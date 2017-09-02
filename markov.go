@@ -1,60 +1,21 @@
-// Copyright 2011 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// This code is based on https://golang.org/doc/codewalk/markov/
+// // Copyright 2011 The Go Authors. All rights reserved.
+// // Use of this source code is governed by a BSD-style
+// // license that can be found in the LICENSE file.
+// The relevant license can be found at https://golang.org/LICENSE
 
-/*
-Generating random text: a Markov chain algorithm
-
-Based on the program presented in the "Design and Implementation" chapter
-of The Practice of Programming (Kernighan and Pike, Addison-Wesley 1999).
-See also Computer Recreations, Scientific American 260, 122 - 125 (1989).
-
-A Markov chain algorithm generates text by creating a statistical model of
-potential textual suffixes for a given prefix. Consider this text:
-
-	I am not a number! I am a free man!
-
-Our Markov chain algorithm would arrange this text into this set of prefixes
-and suffixes, or "chain": (This table assumes a prefix length of two words.)
-
-	Prefix       Suffix
-
-	"" ""        I
-	"" I         am
-	I am         a
-	I am         not
-	a free       man!
-	am a         free
-	am not       a
-	a number!    I
-	number! I    am
-	not a        number!
-
-To generate text using this table we select an initial prefix ("I am", for
-example), choose one of the suffixes associated with that prefix at random
-with probability determined by the input statistics ("a"),
-and then create a new prefix by removing the first word from the prefix
-and appending the suffix (making the new prefix is "am a"). Repeat this process
-until we can't find any suffixes for the current prefix or we exceed the word
-limit. (The word limit is necessary as the chain table may contain cycles.)
-
-Our version of this program reads text from standard input, parsing it into a
-Markov chain, and writes generated text to standard output.
-The prefix and output lengths can be specified using the -prefix and -words
-flags on the command-line.
-*/
 package main
 
 import (
 	"bufio"
-	"flag"
-	"fmt"
+	"bytes"
 	"io"
 	"math/rand"
-	"os"
 	"strings"
-	"time"
 )
+
+// used to indicate that the line should end
+const ENDLINE = "____ENDLINE"
 
 // Prefix is a Markov chain prefix of one or more words.
 type Prefix []string
@@ -74,57 +35,98 @@ func (p Prefix) Shift(word string) {
 // A prefix is a string of prefixLen words joined with spaces.
 // A suffix is a single word. A prefix can have multiple suffixes.
 type Chain struct {
-	chain     map[string][]string
-	prefixLen int
+	chain        map[string][]string
+	maxPrefixLen int
 }
 
 // NewChain returns a new Chain with prefixes of prefixLen words.
-func NewChain(prefixLen int) *Chain {
-	return &Chain{make(map[string][]string), prefixLen}
+func NewChain(maxPrefixLen int) *Chain {
+	return &Chain{make(map[string][]string), maxPrefixLen}
 }
 
 // Build reads text from the provided Reader and
 // parses it into prefixes and suffixes that are stored in Chain.
-func (c *Chain) Build(r io.Reader) {
-	br := bufio.NewReader(r)
-	p := make(Prefix, c.prefixLen)
-	for {
-		var s string
-		if _, err := fmt.Fscan(br, &s); err != nil {
-			break
+func (c *Chain) Build(r io.Reader, avoidR io.Reader) {
+	avoid := map[string]struct{}{}
+	scanner := bufio.NewScanner(avoidR)
+	for scanner.Scan() {
+		for _, s := range strings.Fields(scanner.Text()) {
+			if len(s) >= 3 {
+				avoid[strings.ToLower(s)] = struct{}{}
+			}
 		}
-		key := p.String()
-		c.chain[key] = append(c.chain[key], s)
-		p.Shift(s)
+	}
+
+	scanner = bufio.NewScanner(r)
+	for scanner.Scan() {
+		ps := make([]Prefix, c.maxPrefixLen)
+		for i := 0; i < c.maxPrefixLen; i++ {
+			ps[i] = make(Prefix, i+1)
+		}
+		for _, s := range strings.Fields(scanner.Text()) {
+			// add a - to words in the avoid list, ie foo -> f-oo
+			lowers := strings.ToLower(s)
+			lowers = strings.TrimPrefix(lowers, "<")
+			lowers = strings.TrimSuffix(lowers, ">")
+			_, exists := avoid[lowers]
+			exists2 := false
+			if len(lowers) > 1 {
+				_, exists2 = avoid[lowers[:len(lowers)-1]]
+			}
+			if exists || exists2 {
+				s = s[:1] + "-" + s[1:]
+			}
+			for i := 0; i < c.maxPrefixLen; i++ {
+				key := ps[i].String()
+				c.chain[key] = append(c.chain[key], s)
+				ps[i].Shift(s)
+			}
+		}
+		for i := 0; i < c.maxPrefixLen; i++ {
+			key := ps[i].String()
+			c.chain[key] = append(c.chain[key], ENDLINE)
+		}
 	}
 }
 
 // Generate returns a string of at most n words generated from Chain.
 func (c *Chain) Generate(n int) string {
-	p := make(Prefix, c.prefixLen)
+	ps := make([]Prefix, c.maxPrefixLen)
+	for i := 0; i < c.maxPrefixLen; i++ {
+		ps[i] = make(Prefix, i+1)
+	}
 	var words []string
 	for i := 0; i < n; i++ {
-		choices := c.chain[p.String()]
+		var choices []string
+		for j := 0; j < c.maxPrefixLen; j++ {
+			choices = append(choices, c.chain[ps[j].String()]...)
+		}
 		if len(choices) == 0 {
 			break
 		}
+		//fmt.Println("considering", choices)
 		next := choices[rand.Intn(len(choices))]
+		if next == ENDLINE { // make ending lines less frequent
+			next = choices[rand.Intn(len(choices))]
+		}
 		words = append(words, next)
-		p.Shift(next)
+		for j := 0; j < c.maxPrefixLen; j++ {
+			ps[j].Shift(next)
+		}
 	}
-	return strings.Join(words, " ")
+	return strings.Replace(strings.Join(words, " "), ENDLINE, "", -1)
 }
 
-func main() {
-	// Register command-line flags.
-	numWords := flag.Int("words", 100, "maximum number of words to print")
-	prefixLen := flag.Int("prefix", 2, "prefix length in words")
-
-	flag.Parse()                     // Parse command-line flags.
-	rand.Seed(time.Now().UnixNano()) // Seed the random number generator.
-
-	c := NewChain(*prefixLen)     // Initialize a new Chain.
-	c.Build(os.Stdin)             // Build chains from standard input.
-	text := c.Generate(*numWords) // Generate text.
-	fmt.Println(text)             // Write text to standard output.
+//https://stackoverflow.com/questions/33633168/how-to-insert-a-character-every-x-characters-in-a-string-in-golang
+func insertNth(s string, n int) string {
+	var buffer bytes.Buffer
+	var n_1 = n - 1
+	var l_1 = len(s) - 1
+	for i, rune := range s {
+		buffer.WriteRune(rune)
+		if i%n == n_1 && i != l_1 {
+			buffer.WriteRune(' ')
+		}
+	}
+	return buffer.String()
 }
