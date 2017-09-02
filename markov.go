@@ -4,11 +4,10 @@
 // // license that can be found in the LICENSE file.
 // The relevant license can be found at https://golang.org/LICENSE
 
-package main
+package markovChain
 
 import (
 	"bufio"
-	"bytes"
 	"io"
 	"math/rand"
 	"strings"
